@@ -1,0 +1,16 @@
+# SAM CLI configuration file
+
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "myQA-rds"
+resolve_s3 = true
+s3_prefix = "myQA-rds"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+# parameter_overrides = "DBUser=\"postgres\" DBPassword=\"your-password\""
+parameter_overrides = "DBName=\"myqa\" DBUser=\"postgres\""
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-northeast-1"
