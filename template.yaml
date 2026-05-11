@@ -16,6 +16,13 @@ Parameters:
     NoEcho: true
     MinLength: 8
     Description: Database master password (8 characters or more)
+  CognitoDomainPrefix:
+    Type: String
+    Description: Cognito Managed Login Page domain prefix (globally unique)
+  FrontendUrl:
+    Type: String
+    Default: http://localhost:3000
+    Description: Frontend application URL (for OAuth callback)
 
 Globals:
   Function:
@@ -329,8 +336,8 @@ Resources:
             RestApiId: !Ref QAApi
             Path: /questions
             Method: get
-            Auth:
-              Authorizer: NONE
+            # Auth:
+            #   Authorizer: NONE
 
   # Get question detail + answers
   GetQuestionFunction:
@@ -363,8 +370,8 @@ Resources:
             RestApiId: !Ref QAApi
             Path: /questions/{question_id}
             Method: get
-            Auth:
-              Authorizer: NONE
+            # Auth:
+            #   Authorizer: NONE
 
   # Post question
   PostQuestionFunction:
@@ -397,8 +404,8 @@ Resources:
             RestApiId: !Ref QAApi
             Path: /questions
             Method: post
-            Auth:
-              Authorizer: NONE
+            # Auth:
+            #   Authorizer: NONE
 
   # Post answer
   PostAnswerFunction:
@@ -431,8 +438,8 @@ Resources:
             RestApiId: !Ref QAApi
             Path: /questions/{question_id}/answers
             Method: post
-            Auth:
-              Authorizer: NONE
+            # Auth:
+            #   Authorizer: NONE
 
   # Create tables (not integrated with API Gateway)
   CreateTablesFunction:
@@ -511,6 +518,7 @@ Resources:
   # Cognito User Pool Application Client
   UserPoolAppClient:
     Type: AWS::Cognito::UserPoolClient
+    DependsOn: UserPoolDomain
     Properties:
       ClientName: !Sub "${AWS::StackName}-appclient"
       GenerateSecret: false
@@ -519,8 +527,27 @@ Resources:
         - ALLOW_USER_AUTH
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
-      UserPoolId:
-        Ref: UserPool
+      UserPoolId: !Ref UserPool
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Sub "${FrontendUrl}/callback"
+      LogoutURLs:
+        - !Ref FrontendUrl
+
+  # Cognito User Pool Domain (Managed Login Page)
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref UserPool
 
 # ============================================================
 # Outputs
@@ -544,3 +571,6 @@ Outputs:
   UserPoolAppClientId:
     Description: Cognito User Pool App Client ID
     Value: !Ref UserPoolAppClient
+  CognitoDomain:
+    Description: Cognito Managed Login Page URL
+    Value: !Sub "https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com"

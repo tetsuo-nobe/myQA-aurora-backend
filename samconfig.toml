@@ -3,13 +3,13 @@
 version = 0.1
 
 [default.deploy.parameters]
-stack_name = "myQA-rds"
+stack_name = "myQA-aurora-backend"
 resolve_s3 = true
-s3_prefix = "myQA-rds"
+s3_prefix = "myQA-aurora-backend"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 # parameter_overrides = "DBUser=\"postgres\" DBPassword=\"your-password\""
-parameter_overrides = "DBName=\"myqa\" DBUser=\"postgres\""
+parameter_overrides = "DBName=\"myqa\" DBUser=\"postgres\" CognitoDomainPrefix=\"myqa-aurora\" FrontendUrl=\"http://localhost:3000\""
 image_repositories = []
 
 [default.global.parameters]

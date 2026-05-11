@@ -1,0 +1,629 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: myQA-rds - Q&A Application Backend API (RDS PostgreSQL)
+Parameters:
+  DBName:
+    Type: String
+    Default: myqa
+    Description: Database name
+  DBUser:
+    Type: String
+    Default: postgres
+    Description: Database master username
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Database master password (8 characters or more)
+  CognitoDomainPrefix:
+    Type: String
+    Description: Cognito Managed Login Page domain prefix (globally unique)
+  FrontendUrl:
+    Type: String
+    Default: http://localhost:3000
+    Description: Frontend application URL (for OAuth callback)
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: python3.13
+    MemorySize: 128
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-igw
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: InternetGateway
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: ''
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-public-a
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs: ''
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-public-c
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: ''
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-private-a
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs: ''
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-private-c
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-public-rt
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId:
+        Ref: InternetGateway
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnetA
+      RouteTableId:
+        Ref: PublicRouteTable
+  PublicSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnetC
+      RouteTableId:
+        Ref: PublicRouteTable
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - NatEIP
+        - AllocationId
+      SubnetId:
+        Ref: PublicSubnetA
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-nat
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-private-rt
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId:
+        Ref: NatGateway
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnetA
+      RouteTableId:
+        Ref: PrivateRouteTable
+  PrivateSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnetC
+      RouteTableId:
+        Ref: PrivateRouteTable
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId:
+        Ref: VPC
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: '0.0.0.0/0'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-lambda-sg
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS PostgreSQL
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        SourceSecurityGroupId:
+          Ref: LambdaSecurityGroup
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-rds-sg
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for myQA-rds
+      SubnetIds:
+      - Ref: PrivateSubnetA
+      - Ref: PrivateSubnetC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-db-subnet-group
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier:
+        Fn::Sub: ${AWS::StackName}-cluster
+      Engine: aurora-postgresql
+      EngineVersion: '16.4'
+      DatabaseName:
+        Ref: DBName
+      MasterUsername:
+        Ref: DBUser
+      MasterUserPassword:
+        Ref: DBPassword
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      VpcSecurityGroupIds:
+      - Ref: RDSSecurityGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 2
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      EnableHttpEndpoint: true
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-cluster
+  AuroraInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier:
+        Fn::Sub: ${AWS::StackName}-instance
+      DBClusterIdentifier:
+        Ref: AuroraCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${AWS::StackName}-instance
+  QAApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn:
+              Fn::GetAtt:
+              - UserPool
+              - Arn
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowOrigin: '''*'''
+        AllowMethods: '''OPTIONS,POST,PUT,GET,DELETE'''
+        AllowHeaders: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+      GatewayResponses:
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Headers: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+              Access-Control-Allow-Origin: '''*'''
+              Access-Control-Allow-Methods: '''OPTIONS,GET,POST,PUT,DELETE'''
+          ResponseTemplates:
+            application/json: '{"message": "Error $context.error.messageString " }'
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Headers: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+              Access-Control-Allow-Origin: '''*'''
+              Access-Control-Allow-Methods: '''OPTIONS,GET,POST,PUT,DELETE'''
+          ResponseTemplates:
+            application/json: '{"message": "Error $context.error.messageString " }'
+  GetQuestionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-get-questions
+      CodeUri: GetQuestionsFunction
+      Handler: get_questions.lambda_handler
+      Policies:
+      - VPCAccessPolicy: {}
+      Layers:
+      - Ref: DepsLayer
+      VpcConfig:
+        SubnetIds:
+        - Ref: PrivateSubnetA
+        - Ref: PrivateSubnetC
+        SecurityGroupIds:
+        - Ref: LambdaSecurityGroup
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Address
+          DB_NAME:
+            Ref: DBName
+          DB_USER:
+            Ref: DBUser
+          DB_PASSWORD:
+            Ref: DBPassword
+          DB_PORT:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Port
+      Events:
+        GetQuestions:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: QAApi
+            Path: /questions
+            Method: get
+    Metadata:
+      SamResourceId: GetQuestionsFunction
+  GetQuestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-get-question
+      CodeUri: GetQuestionFunction
+      Handler: get_question.lambda_handler
+      Policies:
+      - VPCAccessPolicy: {}
+      Layers:
+      - Ref: DepsLayer
+      VpcConfig:
+        SubnetIds:
+        - Ref: PrivateSubnetA
+        - Ref: PrivateSubnetC
+        SecurityGroupIds:
+        - Ref: LambdaSecurityGroup
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Address
+          DB_NAME:
+            Ref: DBName
+          DB_USER:
+            Ref: DBUser
+          DB_PASSWORD:
+            Ref: DBPassword
+          DB_PORT:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Port
+      Events:
+        GetQuestion:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: QAApi
+            Path: /questions/{question_id}
+            Method: get
+    Metadata:
+      SamResourceId: GetQuestionFunction
+  PostQuestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-post-question
+      CodeUri: PostQuestionFunction
+      Handler: post_question.lambda_handler
+      Policies:
+      - VPCAccessPolicy: {}
+      Layers:
+      - Ref: DepsLayer
+      VpcConfig:
+        SubnetIds:
+        - Ref: PrivateSubnetA
+        - Ref: PrivateSubnetC
+        SecurityGroupIds:
+        - Ref: LambdaSecurityGroup
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Address
+          DB_NAME:
+            Ref: DBName
+          DB_USER:
+            Ref: DBUser
+          DB_PASSWORD:
+            Ref: DBPassword
+          DB_PORT:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Port
+      Events:
+        PostQuestion:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: QAApi
+            Path: /questions
+            Method: post
+    Metadata:
+      SamResourceId: PostQuestionFunction
+  PostAnswerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-post-answer
+      CodeUri: PostAnswerFunction
+      Handler: post_answer.lambda_handler
+      Policies:
+      - VPCAccessPolicy: {}
+      Layers:
+      - Ref: DepsLayer
+      VpcConfig:
+        SubnetIds:
+        - Ref: PrivateSubnetA
+        - Ref: PrivateSubnetC
+        SecurityGroupIds:
+        - Ref: LambdaSecurityGroup
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Address
+          DB_NAME:
+            Ref: DBName
+          DB_USER:
+            Ref: DBUser
+          DB_PASSWORD:
+            Ref: DBPassword
+          DB_PORT:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Port
+      Events:
+        PostAnswer:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: QAApi
+            Path: /questions/{question_id}/answers
+            Method: post
+    Metadata:
+      SamResourceId: PostAnswerFunction
+  CreateTablesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-create-tables
+      CodeUri: CreateTablesFunction
+      Handler: create_tables.lambda_handler
+      Timeout: 30
+      Policies:
+      - VPCAccessPolicy: {}
+      Layers:
+      - Ref: DepsLayer
+      VpcConfig:
+        SubnetIds:
+        - Ref: PrivateSubnetA
+        - Ref: PrivateSubnetC
+        SecurityGroupIds:
+        - Ref: LambdaSecurityGroup
+      Environment:
+        Variables:
+          DB_HOST:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Address
+          DB_NAME:
+            Ref: DBName
+          DB_USER:
+            Ref: DBUser
+          DB_PASSWORD:
+            Ref: DBPassword
+          DB_PORT:
+            Fn::GetAtt:
+            - AuroraCluster
+            - Endpoint.Port
+    Metadata:
+      SamResourceId: CreateTablesFunction
+  DepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName:
+        Fn::Sub: ${AWS::StackName}-deps
+      Description: psycopg2-binary layer
+      ContentUri: DepsLayer
+      CompatibleRuntimes:
+      - python3.13
+    Metadata:
+      BuildArchitecture: x86_64
+      BuildMethod: python3.13
+      SamResourceId: DepsLayer
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName:
+        Fn::Sub: ${AWS::StackName}-userpool
+      UsernameAttributes:
+      - email
+      AutoVerifiedAttributes:
+      - email
+      Schema:
+      - Name: email
+        AttributeDataType: String
+        DeveloperOnlyAttribute: false
+        Mutable: true
+        Required: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+        - Name: verified_email
+          Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      DeletionProtection: INACTIVE
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+  UserPoolAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: UserPoolDomain
+    Properties:
+      ClientName:
+        Fn::Sub: ${AWS::StackName}-appclient
+      GenerateSecret: false
+      RefreshTokenValidity: 30
+      ExplicitAuthFlows:
+      - ALLOW_USER_AUTH
+      - ALLOW_USER_SRP_AUTH
+      - ALLOW_REFRESH_TOKEN_AUTH
+      UserPoolId:
+        Ref: UserPool
+      SupportedIdentityProviders:
+      - COGNITO
+      AllowedOAuthFlows:
+      - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+      - openid
+      - email
+      - profile
+      CallbackURLs:
+      - Fn::Sub: ${FrontendUrl}/callback
+      LogoutURLs:
+      - Ref: FrontendUrl
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain:
+        Ref: CognitoDomainPrefix
+      UserPoolId:
+        Ref: UserPool
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value:
+      Fn::Sub: https://${QAApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  AuroraEndpoint:
+    Description: Aurora Serverless v2 endpoint
+    Value:
+      Fn::GetAtt:
+      - AuroraCluster
+      - Endpoint.Address
+  AuroraPort:
+    Description: Aurora Serverless v2 port
+    Value:
+      Fn::GetAtt:
+      - AuroraCluster
+      - Endpoint.Port
+  VPCId:
+    Description: VPC ID
+    Value:
+      Ref: VPC
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value:
+      Ref: UserPool
+  UserPoolAppClientId:
+    Description: Cognito User Pool App Client ID
+    Value:
+      Ref: UserPoolAppClient
+  CognitoDomain:
+    Description: Cognito Managed Login Page URL
+    Value:
+      Fn::Sub: https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com
